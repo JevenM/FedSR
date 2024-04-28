@@ -72,6 +72,7 @@ class MultipleEnvironmentMNIST(MultipleDomainDataset):
 
         self.datasets = []
 
+        # 每隔6个数据形成一个列表，将数组切片为6个子列表，每个列表根据environments[i]旋转相应角度
         for i in range(len(environments)):
             images = original_images[i::len(environments)]
             labels = original_labels[i::len(environments)]
@@ -124,7 +125,7 @@ class ColoredMNIST(MultipleEnvironmentMNIST):
 class RotatedMNIST(MultipleEnvironmentMNIST):
     ENVIRONMENTS = ['0', '15', '30', '45', '60', '75']
 
-    def __init__(self, root, test_envs):
+    def __init__(self, root):
         super(RotatedMNIST, self).__init__(root, [0, 15, 30, 45, 60, 75],
                                            self.rotate_dataset, (1, 28, 28,), 10)
 

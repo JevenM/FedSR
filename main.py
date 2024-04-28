@@ -17,7 +17,7 @@ from datasets import *
 from util import *
 from prepare import *
 
-data = eval(args.dataset)(root=args.dataset_folder,test_envs=[args.test_env])
+data = eval(args.dataset)(root=args.dataset_folder, test_envs=[args.test_env])
 args.num_classes = data.num_classes
 
 
