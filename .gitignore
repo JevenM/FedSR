@@ -1,1 +1,5 @@
 methods/.DS_Store
+*.png
+*.pyc
+*.log
+*.0

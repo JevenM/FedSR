@@ -58,6 +58,8 @@ simclr_lr = 0.0001 # 0.001,0.0002的时候loss为nan
 gen_lr = 0.0002
 disc_lr = 0.0002
 cls_lr = 0.001
+source_domain = 0 # 0度
+target_domain = 2 # 30度
 
 comments = f"c_{dataset_name}-ar{adv_num_epoch}-cr{cls_epochs}-ls{latent_space}-ed{embedding_d}-m{method}-de{discr_e}-ge{gen_e}-se{simclr_e}-t{temperature}-a{alpha}-bs{batch_size}-glr{gen_lr}-dlr{disc_lr}-clr{cls_lr}-slr{simclr_lr}"
 print(comments)
@@ -250,22 +252,27 @@ class Classifier(torch.nn.Module):
 #     test_dataset = torchvision.datasets.MNIST(root=datapath, train=False, download=False, transform=transform)
 #     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-data = eval("RotateMnist")(root="./data")
+data = eval("RotatedMNIST")(root="/data/mwj/dataset")
 
-dataset = data.datasets[[0,1,2,3,4]]
+
+dataset = data.datasets[source_domain] # 0度
 train_len = int(len(dataset) * 0.9)
 test_len = len(dataset) - train_len
-trainset, testset = random_split(dataset, [train_len,test_len], generator=torch.Generator().manual_seed(0))
+train_dataset, test_dataset = random_split(dataset, [train_len,test_len], generator=torch.Generator().manual_seed(0))
 # change the transform of test split 
-if hasattr(testset.dataset,'transform'):
+if hasattr(test_dataset.dataset,'transform'):
     import copy
-    testset.dataset = copy.copy(testset.dataset)
-    testset.dataset.transform = data.transform
+    test_dataset.dataset = copy.copy(test_dataset.dataset)
+    test_dataset.dataset.transform = data.transform
 
-trainloader = DataLoader(trainset,batch_size=64,shuffle=True,num_workers=4)
-testloader = DataLoader(testset,batch_size=64,shuffle=True,num_workers=4)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=4)
+test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=4)
 
-'''
+
+
+testset_t = data.datasets[target_domain] #30度
+testloader_t = DataLoader(testset_t, batch_size=64, shuffle=False, num_workers=4)
+
 
 gen = Generator().to(device)
 
@@ -294,7 +301,11 @@ discriminator.train()
 
 for epoch in range(adv_num_epoch):  # 迭代10次
     d_loss,g_loss,ls = 0,0,0
-    for iter, (real_images, labels) in enumerate(train_loader):
+    data_iter = iter(testloader_t)
+    for itr, (real_images, labels) in enumerate(train_loader):
+        target_image, tar_y = next(data_iter)
+        target_image = target_image.to(device)
+        bs_t = target_image.size(0)
         batchsize = real_images.size(0)
         real_images = real_images.to(device)
         z = torch.randn(batchsize, latent_space).to(device)
@@ -315,6 +326,10 @@ for epoch in range(adv_num_epoch):  # 迭代10次
             # fake_images = gen(z).to(device)
             fake_images = gen(z, y)
 
+            true_labels_t = torch.ones(bs_t, 1).to(device)
+            tar_outputs = discriminator(target_image.view(bs_t, -1), torch.zeros(bs_t, num_classes).to(device))
+            loss_real_t = criterion_disc(tar_outputs, true_labels_t)
+
             # print(fake_images[0])
             fake_outputs = discriminator(fake_images.to(device), y)
             # fake_outputs = discriminator(fake_images.to(device))
@@ -322,7 +337,8 @@ for epoch in range(adv_num_epoch):  # 迭代10次
             loss_fake = criterion_disc(fake_outputs, fake_labels)
             fake_scores = fake_outputs  # 得到假图片的判别值，对于判别器来说，假图片的损失越接近0越好
 
-            loss_disc = (loss_real + loss_fake) / 2
+
+            loss_disc = (loss_real + loss_fake + loss_real_t) / 3
             loss_disc.backward()
             optimizer_disc.step()
             # print(f'Epoch [{epoch+1}/10] [{k+1/str(discr_e)}], Loss Disc: {loss_disc.item()}')
@@ -337,6 +353,7 @@ for epoch in range(adv_num_epoch):  # 迭代10次
             gen_outputs = discriminator(gen_images, y)
             # gen_outputs = discriminator(gen_images)
             loss_gen = criterion_gen(gen_outputs, real_labels)
+
             # loss_gen = loss_gen + loss
             # loss_gen = torch.log(1.0 - (discriminator(gen_images)).detach()) 
             loss_gen.backward()
@@ -389,10 +406,10 @@ for epoch in range(adv_num_epoch):  # 迭代10次
         #       'D real: {:.6f}, D fake: {:.6f}'.format(epoch, num_epoch, loss_disc.data.item(), loss_gen.data.item(), loss.data.item(),
         #                                              real_scores.data.mean(), fake_scores.data.mean()  # 打印的是真实图片的损失均值
         #     ))
-        if epoch == 0 and iter==len(train_loader)-1:
+        if epoch == 0 and itr==len(train_loader)-1:
             real_images = to_img(real_images.cuda().data)
             save_image(real_images, os.path.join(images_path, 'r'+str(adv_num_epoch)+'_real_images.png'))
-        if iter==len(train_loader)-1:
+        if itr==len(train_loader)-1:
             fake_images = to_img(fake_images.cuda().data)
             save_image(fake_images, os.path.join(images_path, 'r'+str(adv_num_epoch)+'_fake_images-{}.png'.format(epoch + 1)))
     summary_writer.add_scalar('Train-Adv/d_loss', d_loss/len(train_loader), epoch+1)
@@ -489,7 +506,7 @@ for epo in range(cls_epochs):
     log.info('Epoch [%d/%d], Loss_t: %.4f, Loss_f: %.4f' % (epo+1, cls_epochs, running_loss_t / len(train_dataset), running_loss_f / len(train_dataset)))
 
 
-# 测试编码器的准确率
+# 测试编码器的准确率在源域
 clser.eval()
 with torch.no_grad():
     true_labels = []
@@ -506,9 +523,31 @@ with torch.no_grad():
         pred_labels.extend(pred.cpu().numpy())
         out_labels.extend(outd.cpu().numpy())
 accuracy1 = accuracy_score(true_labels, pred_labels)
-log.info(f'pseudo Accuracy: {accuracy1}') # pseudo Accuracy: 0.4556
+log.info(f'pseudo Accuracy on S: {accuracy1}') # pseudo Accuracy: 0.4556
 accuracy2 = accuracy_score(true_labels, out_labels)
-log.info(f'test Accuracy: {accuracy2}') # Accuracy: 0.7762
+log.info(f'test Accuracy on S: {accuracy2}') # Accuracy: 0.7762
+
+# 测试编码器的准确率在目标域
+clser.eval()
+with torch.no_grad():
+    true_labels = []
+    pred_labels = []
+    out_labels = []
+    for images, labels in testloader_t:
+        images = images.to(device)
+        features, outputs = clser(images)
+        pred = compute_distances(features, prototypes)
+        # similarity_scores = torch.matmul(features, prototypes.t())  # 计算相似度(效果不如L2)
+        # _, pred = torch.max(similarity_scores, dim=1)  # 选择最相似的类别作为预测标签
+        _, outd = torch.max(outputs, dim=1)
+        true_labels.extend(labels.numpy())
+        pred_labels.extend(pred.cpu().numpy())
+        out_labels.extend(outd.cpu().numpy())
+accuracy1 = accuracy_score(true_labels, pred_labels)
+log.info(f'pseudo Accuracy on T: {accuracy1}') # pseudo Accuracy: 0.4556
+accuracy2 = accuracy_score(true_labels, out_labels)
+log.info(f'test Accuracy on T: {accuracy2}') # Accuracy: 0.7762
+
 
 cls_save_path = os.path.join(save_dir, str(adv_num_epoch)+'_clser.pth')
 
@@ -517,6 +556,8 @@ torch.save(clser.state_dict(), cls_save_path)
 # clser.load_state_dict(torch.load(str(adv_num_epoch)+'_clser.pth'))
 
 model_trunc = create_feature_extractor(clser, return_nodes={'encoder': 'semantic_feature'})
+
+#1 源域
 
 data_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
 encoding_array = []
@@ -528,7 +569,7 @@ for batch_idx, (images, labels) in enumerate(data_loader):
     encoding_array.append(feature)
 encoding_array = np.array(encoding_array)
 # 保存为本地的 npy 文件
-np.save(os.path.join(save_dir, 'clser测试集语义特征_mnist.npy'), encoding_array)
+np.save(os.path.join(save_dir, f'clser源域{source_domain}测试集语义特征_mnist.npy'), encoding_array)
 
 
 marker_list = ['.', ',', 'o', 'v', '^', '<', '>', '1', '2', '3', '4', '8', 's', 'p', 'P', '*', 'h', 'H', '+', 'x', 'X', 'D', 'd', '|', '_', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
@@ -564,9 +605,62 @@ for method in ['PCA', 'TSNE']:
     plt.xticks([])
     plt.yticks([])
 
-    dim_reduc_save_path = os.path.join(save_dir, f'clser_mnist_语义特征{method}二维降维可视化.pdf')
+    dim_reduc_save_path = os.path.join(save_dir, f'clser_mnist_源域{source_domain}语义特征{method}二维降维可视化.pdf')
 
     plt.savefig(dim_reduc_save_path, dpi=300, bbox_inches='tight') # 保存图像
 
+
+#1 目标域
+
+data_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
+encoding_array = []
+labels_list = []
+for batch_idx, (images, labels) in enumerate(data_loader):
+    images, labels = images.to(device), labels.to(device)
+    labels_list.append(labels.item())
+    feature = model_trunc(images)['semantic_feature'].squeeze().flatten().detach().cpu().numpy() # 执行前向预测，得到 avgpool 层输出的语义特征
+    encoding_array.append(feature)
+encoding_array = np.array(encoding_array)
+# 保存为本地的 npy 文件
+np.save(os.path.join(save_dir, f'clser目标域{target_domain}测试集语义特征_mnist.npy'), encoding_array)
+
+
+marker_list = ['.', ',', 'o', 'v', '^', '<', '>', '1', '2', '3', '4', '8', 's', 'p', 'P', '*', 'h', 'H', '+', 'x', 'X', 'D', 'd', '|', '_', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+class_list = test_dataset.classes
+n_class = len(class_list) # 测试集标签类别数
+palette = sns.hls_palette(n_class) # 配色方案
+sns.palplot(palette)
+# 随机打乱颜色列表和点型列表
+random.seed(1234)
+random.shuffle(marker_list)
+random.shuffle(palette)
+
+
+for method in ['PCA', 'TSNE']:
+    #选择降维方法
+    if method == 'PCA': 
+        X_2d = PCA(n_components=2).fit_transform(encoding_array)
+    if method == 'TSNE': 
+        X_2d = TSNE(n_components=2, random_state=0, n_iter=20000).fit_transform(encoding_array)
+
+    class_to_idx = test_dataset.class_to_idx
+
+    plt.figure(figsize=(14, 14))
+    for idx, fruit in enumerate(class_list): # 遍历每个类别
+        #print(fruit)
+        # 获取颜色和点型
+        color = palette[idx]
+        marker = marker_list[idx%len(marker_list)]
+        # 找到所有标注类别为当前类别的图像索引号
+        indices = np.where(np.array(labels_list)==class_to_idx[fruit])
+        plt.scatter(X_2d[indices, 0], X_2d[indices, 1], color=color, marker=marker, label=fruit, s=150)
+    plt.legend(fontsize=16, markerscale=1, bbox_to_anchor=(1, 1))
+    plt.xticks([])
+    plt.yticks([])
+
+    dim_reduc_save_path = os.path.join(save_dir, f'clser_mnist_目标域{target_domain}语义特征{method}二维降维可视化.pdf')
+
+    plt.savefig(dim_reduc_save_path, dpi=300, bbox_inches='tight') # 保存图像
+
+
 log.info(result_name)
-'''
