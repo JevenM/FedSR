@@ -29,6 +29,8 @@ torch.backends.cudnn.benchmark = True
 '''
 code transferred from /home/mwj/mycode2/Diffusion/adv_adaption_cgan.py 
 20240426
+
+修改之后，将任务应用到不同域（RotatedMNIST）上
 '''
 
 
@@ -59,7 +61,7 @@ gen_lr = 0.0002
 disc_lr = 0.0002
 cls_lr = 0.001
 source_domain = 0 # 0度
-target_domain = 2 # 30度
+target_domain = 5 # 2:30度 5:75度
 
 comments = f"c_{dataset_name}-ar{adv_num_epoch}-cr{cls_epochs}-ls{latent_space}-ed{embedding_d}-m{method}-de{discr_e}-ge{gen_e}-se{simclr_e}-t{temperature}-a{alpha}-bs{batch_size}-glr{gen_lr}-dlr{disc_lr}-clr{cls_lr}-slr{simclr_lr}"
 print(comments)
@@ -123,7 +125,9 @@ def compute_distances(features, prototypes):
     return torch.argmin(distances, dim=1)
 
 def to_img(x):
-    out = 0.5 * (x + 0.5)
+    # 应用在RotatedMNIST不用标准化
+    # out = 0.5 * (x + 0.5)
+    out = x
     out = out.clamp(0, 1)  # Clamp函数可以将随机变化的数值限制在一个给定的区间[min, max]内：
     out = out.view(-1, 1, 28, 28)  # view()函数作用是将一个多行的Tensor,拼接成一行
     return out
@@ -252,12 +256,51 @@ class Classifier(torch.nn.Module):
 #     test_dataset = torchvision.datasets.MNIST(root=datapath, train=False, download=False, transform=transform)
 #     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
+class NormalClassifier(torch.nn.Module):
+    def __init__(self, simclr_model, num_class=10):
+        super(NormalClassifier, self).__init__()
+        # encoder
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        # classifier
+        self.fc = nn.Linear(2 * 2 * 256, num_class, bias=True)
+
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
+    def forward(self, x):
+        x = self.encoder(x)
+        feature = torch.flatten(x, start_dim=1)
+        out = self.fc(feature)
+        return feature, out
+
+
+
 data = eval("RotatedMNIST")(root="/data/mwj/dataset")
 
-
-dataset = data.datasets[source_domain] # 0度
+# 0度
+# dataset = data.datasets[source_domain]
+# 前5个域
+dataset = data.datasets[:target_domain]
+data_set = dataset[0]
+for ds in dataset[1:]:
+    data_set += ds
+dataset = data_set
 train_len = int(len(dataset) * 0.9)
 test_len = len(dataset) - train_len
+print(train_len, test_len)
 train_dataset, test_dataset = random_split(dataset, [train_len,test_len], generator=torch.Generator().manual_seed(0))
 # change the transform of test split 
 if hasattr(test_dataset.dataset,'transform'):
@@ -271,6 +314,7 @@ test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers
 
 
 testset_t = data.datasets[target_domain] #30度
+print(len(testset_t))
 testloader_t = DataLoader(testset_t, batch_size=64, shuffle=False, num_workers=4)
 
 
@@ -303,9 +347,6 @@ for epoch in range(adv_num_epoch):  # 迭代10次
     d_loss,g_loss,ls = 0,0,0
     data_iter = iter(testloader_t)
     for itr, (real_images, labels) in enumerate(train_loader):
-        target_image, tar_y = next(data_iter)
-        target_image = target_image.to(device)
-        bs_t = target_image.size(0)
         batchsize = real_images.size(0)
         real_images = real_images.to(device)
         z = torch.randn(batchsize, latent_space).to(device)
@@ -325,7 +366,12 @@ for epoch in range(adv_num_epoch):  # 迭代10次
             # TODO Generator里面只用self.gen(x)的时候
             # fake_images = gen(z).to(device)
             fake_images = gen(z, y)
-
+            try:
+                target_image, tar_y = next(data_iter)
+                target_image = target_image.to(device)
+                bs_t = target_image.size(0)
+            except StopIteration:
+                break
             true_labels_t = torch.ones(bs_t, 1).to(device)
             tar_outputs = discriminator(target_image.view(bs_t, -1), torch.zeros(bs_t, num_classes).to(device))
             loss_real_t = criterion_disc(tar_outputs, true_labels_t)
@@ -564,6 +610,7 @@ encoding_array = []
 labels_list = []
 for batch_idx, (images, labels) in enumerate(data_loader):
     images, labels = images.to(device), labels.to(device)
+    # print(labels)
     labels_list.append(labels.item())
     feature = model_trunc(images)['semantic_feature'].squeeze().flatten().detach().cpu().numpy() # 执行前向预测，得到 avgpool 层输出的语义特征
     encoding_array.append(feature)
@@ -571,9 +618,12 @@ encoding_array = np.array(encoding_array)
 # 保存为本地的 npy 文件
 np.save(os.path.join(save_dir, f'clser源域{source_domain}测试集语义特征_mnist.npy'), encoding_array)
 
+print(f"源域: {labels_list[:3]}")
 
 marker_list = ['.', ',', 'o', 'v', '^', '<', '>', '1', '2', '3', '4', '8', 's', 'p', 'P', '*', 'h', 'H', '+', 'x', 'X', 'D', 'd', '|', '_', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-class_list = test_dataset.classes
+# class_list = test_dataset.classes
+class_list = ['0 - zero', '1 - one', '2 - two', '3 - three', '4 - four', '5 - five', '6 - six', '7 - seven', '8 - eight', '9 - nine']
+class_to_idx = {'0 - zero': 0, '1 - one': 1, '2 - two': 2, '3 - three': 3, '4 - four': 4, '5 - five': 5, '6 - six': 6, '7 - seven': 7, '8 - eight': 8, '9 - nine': 9}
 n_class = len(class_list) # 测试集标签类别数
 palette = sns.hls_palette(n_class) # 配色方案
 sns.palplot(palette)
@@ -590,7 +640,7 @@ for method in ['PCA', 'TSNE']:
     if method == 'TSNE': 
         X_2d = TSNE(n_components=2, random_state=0, n_iter=20000).fit_transform(encoding_array)
 
-    class_to_idx = test_dataset.class_to_idx
+    # class_to_idx = test_dataset.class_to_idx
 
     plt.figure(figsize=(14, 14))
     for idx, fruit in enumerate(class_list): # 遍历每个类别
@@ -611,12 +661,15 @@ for method in ['PCA', 'TSNE']:
 
 
 #1 目标域
-
-data_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
+data_loader_t = torch.utils.data.DataLoader(testset_t, batch_size=1, shuffle=False)
 encoding_array = []
 labels_list = []
-for batch_idx, (images, labels) in enumerate(data_loader):
+for batch_idx, (images, labels) in enumerate(data_loader_t):
     images, labels = images.to(device), labels.to(device)
+    # print(labels)
+    # one_hot_labels = torch.nn.functional.one_hot(labels, num_classes=num_classes)
+    # labels = labels.unsqueeze(1)
+    # print(labels)
     labels_list.append(labels.item())
     feature = model_trunc(images)['semantic_feature'].squeeze().flatten().detach().cpu().numpy() # 执行前向预测，得到 avgpool 层输出的语义特征
     encoding_array.append(feature)
@@ -624,17 +677,7 @@ encoding_array = np.array(encoding_array)
 # 保存为本地的 npy 文件
 np.save(os.path.join(save_dir, f'clser目标域{target_domain}测试集语义特征_mnist.npy'), encoding_array)
 
-
-marker_list = ['.', ',', 'o', 'v', '^', '<', '>', '1', '2', '3', '4', '8', 's', 'p', 'P', '*', 'h', 'H', '+', 'x', 'X', 'D', 'd', '|', '_', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-class_list = test_dataset.classes
-n_class = len(class_list) # 测试集标签类别数
-palette = sns.hls_palette(n_class) # 配色方案
-sns.palplot(palette)
-# 随机打乱颜色列表和点型列表
-random.seed(1234)
-random.shuffle(marker_list)
-random.shuffle(palette)
-
+print(f"目标域: {labels_list[:3]}")
 
 for method in ['PCA', 'TSNE']:
     #选择降维方法
@@ -643,7 +686,7 @@ for method in ['PCA', 'TSNE']:
     if method == 'TSNE': 
         X_2d = TSNE(n_components=2, random_state=0, n_iter=20000).fit_transform(encoding_array)
 
-    class_to_idx = test_dataset.class_to_idx
+    # class_to_idx = test_dataset.class_to_idx
 
     plt.figure(figsize=(14, 14))
     for idx, fruit in enumerate(class_list): # 遍历每个类别
@@ -652,7 +695,7 @@ for method in ['PCA', 'TSNE']:
         color = palette[idx]
         marker = marker_list[idx%len(marker_list)]
         # 找到所有标注类别为当前类别的图像索引号
-        indices = np.where(np.array(labels_list)==class_to_idx[fruit])
+        indices = np.where(np.array(labels_list, dtype=object)==class_to_idx[fruit])
         plt.scatter(X_2d[indices, 0], X_2d[indices, 1], color=color, marker=marker, label=fruit, s=150)
     plt.legend(fontsize=16, markerscale=1, bbox_to_anchor=(1, 1))
     plt.xticks([])

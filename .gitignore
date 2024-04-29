@@ -3,3 +3,7 @@ methods/.DS_Store
 *.pyc
 *.log
 *.0
+*.npy
+*.pth
+*.pt
+*.pdf
