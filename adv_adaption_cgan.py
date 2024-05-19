@@ -522,6 +522,7 @@ for epo in range(cls_epochs):
     running_loss_t, running_loss_f = 0.0, 0.0
     loss_ce = 0
     for images, labels in train_loader:
+        optimizer_cls.zero_grad()
         images = images.to(device)
         z_ = torch.randn(images.size(0), latent_space).to(device)
         y_ = torch.eye(num_classes)[labels].to(device)  # 将类别转换为one-hot编码
